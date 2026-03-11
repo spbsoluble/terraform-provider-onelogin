@@ -154,6 +154,35 @@ func SetToIntSlice(ctx context.Context, s types.Set) (*[]int, diag.Diagnostics) 
 	return &result, nil
 }
 
+// SetToStringSlice converts a types.Set of String to []string.
+func SetToStringSlice(ctx context.Context, s types.Set) ([]string, diag.Diagnostics) {
+	if s.IsNull() || s.IsUnknown() {
+		return nil, nil
+	}
+	var vals []types.String
+	diags := s.ElementsAs(ctx, &vals, false)
+	if diags.HasError() {
+		return nil, diags
+	}
+	result := make([]string, len(vals))
+	for i, v := range vals {
+		result[i] = v.ValueString()
+	}
+	return result, nil
+}
+
+// StringSliceToSet converts []string to a types.Set of String.
+func StringSliceToSet(ctx context.Context, vals []string) (types.Set, diag.Diagnostics) {
+	if vals == nil {
+		return types.SetValueMust(types.StringType, []attr.Value{}), nil
+	}
+	elems := make([]attr.Value, len(vals))
+	for i, v := range vals {
+		elems[i] = types.StringValue(v)
+	}
+	return types.SetValue(types.StringType, elems)
+}
+
 // InterfaceToString converts an interface{} value to types.String.
 func InterfaceToString(v interface{}) types.String {
 	if v == nil {

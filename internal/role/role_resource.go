@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 
@@ -51,23 +53,23 @@ func (r *roleResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Required:    true,
 				Description: "The name of the role.",
 			},
-			"users": schema.SetAttribute{
-				Optional:    true,
-				Computed:    true,
-				ElementType: types.Int64Type,
-				Description: "A set of user IDs assigned to this role.",
-			},
 			"apps": schema.SetAttribute{
 				Optional:    true,
 				Computed:    true,
-				ElementType: types.Int64Type,
-				Description: "A set of app IDs accessible by this role.",
+				ElementType: types.StringType,
+				Description: "A set of app names accessible by this role.",
+				PlanModifiers: []planmodifier.Set{
+					setplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"admins": schema.SetAttribute{
 				Optional:    true,
 				Computed:    true,
-				ElementType: types.Int64Type,
-				Description: "A set of user IDs who administer this role.",
+				ElementType: types.StringType,
+				Description: "A set of email addresses for users who administer this role.",
+				PlanModifiers: []planmodifier.Set{
+					setplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
@@ -96,11 +98,33 @@ func (r *roleResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
-	sdkRole, diags := plan.ToSDKRole(ctx)
-	resp.Diagnostics.Append(diags...)
+	// Resolve app names → IDs before sending to the API.
+	appNames, d := common.SetToStringSlice(ctx, plan.Apps)
+	resp.Diagnostics.Append(d...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	appIDs, err := r.resolveAppNamesToIDs(ctx, appNames)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving App Names", err.Error())
+		return
+	}
+
+	// Resolve admin emails → IDs before creating.
+	adminEmails, d := common.SetToStringSlice(ctx, plan.Admins)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	adminIDs, err := r.resolveAdminEmailsToIDs(ctx, adminEmails)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving Admin Emails", err.Error())
+		return
+	}
+
+	sdkRole := plan.ToSDKRole()
+	sdkRole.Apps = appIDs
+	sdkRole.Admins = adminIDs
 
 	tflog.Debug(ctx, "Creating role", map[string]any{"name": plan.Name.ValueString()})
 
@@ -146,6 +170,39 @@ func (r *roleResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
+	// Fetch apps and admins via dedicated endpoints (not included in role detail response).
+	fetchedAppIDs, err := r.fetchRoleAppIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Apps", err.Error())
+		return
+	}
+	resolvedNames, err := r.resolveAppIDsToNames(ctx, fetchedAppIDs)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving App IDs to Names", err.Error())
+		return
+	}
+	state.Apps, d = common.StringSliceToSet(ctx, resolvedNames)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	fetchedAdminIDs, err := r.fetchRoleAdminIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Admins", err.Error())
+		return
+	}
+	resolvedAdminEmails, err := r.resolveAdminIDsToEmails(ctx, fetchedAdminIDs)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving Admin IDs to Emails", err.Error())
+		return
+	}
+	state.Admins, d = common.StringSliceToSet(ctx, resolvedAdminEmails)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	diags = resp.State.Set(ctx, &state)
 	resp.Diagnostics.Append(diags...)
 }
@@ -159,7 +216,7 @@ func (r *roleResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	}
 
 	id := int(state.ID.ValueInt64())
-	tflog.Debug(ctx, "Reading role", map[string]any{"id": id})
+	tflog.Debug(ctx, "Read: fetching role from API", map[string]any{"id": id, "name": state.Name.ValueString()})
 
 	result, err := r.client.SDK.GetRoleByIDWithContext(ctx, id, nil)
 	if err != nil {
@@ -179,6 +236,44 @@ func (r *roleResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 
 	diags = state.FromSDKRole(ctx, role)
 	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Fetch apps and admins via dedicated endpoints (not included in role detail response).
+	fetchedAppIDs, err := r.fetchRoleAppIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Apps", err.Error())
+		return
+	}
+	tflog.Debug(ctx, "Read: fetched role app IDs", map[string]any{"id": id, "app_count": len(fetchedAppIDs)})
+
+	appNames, err := r.resolveAppIDsToNames(ctx, fetchedAppIDs)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving App IDs to Names", err.Error())
+		return
+	}
+	tflog.Debug(ctx, "Read: app names resolved", map[string]any{"id": id, "app_count": len(appNames)})
+
+	var d diag.Diagnostics
+	state.Apps, d = common.StringSliceToSet(ctx, appNames)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	fetchedAdminIDs, err := r.fetchRoleAdminIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Admins", err.Error())
+		return
+	}
+	adminEmails, err := r.resolveAdminIDsToEmails(ctx, fetchedAdminIDs)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving Admin IDs to Emails", err.Error())
+		return
+	}
+	state.Admins, d = common.StringSliceToSet(ctx, adminEmails)
+	resp.Diagnostics.Append(d...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -206,7 +301,6 @@ func (r *roleResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	tflog.Debug(ctx, "Updating role", map[string]any{"id": id})
 
 	// Step 1: Update name via the role PUT endpoint.
-	// Only send name — users/admins are synced differentially, apps via UpdateRoleApps.
 	_, err := r.client.SDK.UpdateRoleWithContext(ctx, id, &models.Role{
 		Name: common.StringToStringPtr(plan.Name),
 	})
@@ -215,27 +309,26 @@ func (r *roleResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	// Step 2: Sync apps via dedicated endpoint
-	planApps, d := common.SetToInt32Slice(ctx, plan.Apps)
+	// Step 2: Resolve app names → IDs and sync via dedicated endpoint.
+	planAppNames, d := common.SetToStringSlice(ctx, plan.Apps)
 	resp.Diagnostics.Append(d...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if planApps != nil {
-		_, err = r.client.SDK.UpdateRoleApps(id, common.Int32SliceToIntSlice(planApps))
+	if planAppNames != nil {
+		planAppIDs, err := r.resolveAppNamesToIDs(ctx, planAppNames)
+		if err != nil {
+			resp.Diagnostics.AddError("Error Resolving App Names", err.Error())
+			return
+		}
+		_, err = r.client.SDK.UpdateRoleApps(id, common.Int32SliceToIntSlice(planAppIDs))
 		if err != nil {
 			resp.Diagnostics.AddError("Error Updating Role Apps", err.Error())
 			return
 		}
 	}
 
-	// Step 3: Differential user sync (UpdateRole does NOT handle user removal)
-	r.syncUsers(ctx, id, state, plan, resp)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	// Step 4: Differential admin sync
+	// Step 3: Differential admin sync (resolve emails → IDs first)
 	r.syncAdmins(ctx, id, state, plan, resp)
 	if resp.Diagnostics.HasError() {
 		return
@@ -257,6 +350,39 @@ func (r *roleResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	var newState RoleResourceModel
 	diags = newState.FromSDKRole(ctx, role)
 	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Fetch apps and admins via dedicated endpoints (not included in role detail response).
+	fetchedAppIDs, err := r.fetchRoleAppIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Apps", err.Error())
+		return
+	}
+	resolvedNames, err := r.resolveAppIDsToNames(ctx, fetchedAppIDs)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving App IDs to Names", err.Error())
+		return
+	}
+	newState.Apps, d = common.StringSliceToSet(ctx, resolvedNames)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	fetchedAdminIDs, err := r.fetchRoleAdminIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Admins", err.Error())
+		return
+	}
+	adminEmails, err := r.resolveAdminIDsToEmails(ctx, fetchedAdminIDs)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving Admin IDs to Emails", err.Error())
+		return
+	}
+	newState.Admins, d = common.StringSliceToSet(ctx, adminEmails)
+	resp.Diagnostics.Append(d...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -292,48 +418,155 @@ func (r *roleResource) ImportState(ctx context.Context, req resource.ImportState
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
 }
 
-// syncUsers performs differential add/remove of users on a role.
-func (r *roleResource) syncUsers(ctx context.Context, roleID int, oldState, newPlan RoleResourceModel, resp *resource.UpdateResponse) {
-	oldUsers, d := common.SetToInt32Slice(ctx, oldState.Users)
-	resp.Diagnostics.Append(d...)
-	newUsers, d := common.SetToInt32Slice(ctx, newPlan.Users)
-	resp.Diagnostics.Append(d...)
-	if resp.Diagnostics.HasError() {
-		return
+// fetchRoleAppIDs calls GET /api/2/roles/{id}/apps to get the app IDs for a role.
+// The role detail endpoint (GET /api/2/roles/{id}) does NOT include apps or admins.
+func (r *roleResource) fetchRoleAppIDs(ctx context.Context, roleID int) ([]int32, error) {
+	result, err := r.client.SDK.GetRoleApps(roleID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch apps for role %d: %w", roleID, err)
 	}
-
-	toAdd, toRemove := diffInt32Slices(oldUsers, newUsers)
-
-	if len(toAdd) > 0 {
-		tflog.Debug(ctx, "Adding users to role", map[string]any{"role_id": roleID, "users": toAdd})
-		_, err := r.client.SDK.AddRoleUsers(roleID, common.Int32SliceToIntSlice(toAdd))
-		if err != nil {
-			resp.Diagnostics.AddError("Error Adding Role Users", err.Error())
-			return
+	if result == nil {
+		return nil, nil
+	}
+	apps, err := client.UnmarshalApps(result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse apps for role %d: %w", roleID, err)
+	}
+	ids := make([]int32, 0, len(apps))
+	for i := range apps {
+		if apps[i].ID != nil {
+			ids = append(ids, *apps[i].ID)
 		}
 	}
-
-	if len(toRemove) > 0 {
-		tflog.Debug(ctx, "Removing users from role", map[string]any{"role_id": roleID, "users": toRemove})
-		_, err := r.client.SDK.DeleteRoleUsers(roleID, common.Int32SliceToIntSlice(toRemove))
-		if err != nil {
-			resp.Diagnostics.AddError("Error Removing Role Users", err.Error())
-			return
-		}
-	}
+	return ids, nil
 }
 
-// syncAdmins performs differential add/remove of admins on a role.
+// fetchRoleAdminIDs calls GET /api/2/roles/{id}/admins to get the admin user IDs for a role.
+// The role detail endpoint (GET /api/2/roles/{id}) does NOT include apps or admins.
+func (r *roleResource) fetchRoleAdminIDs(ctx context.Context, roleID int) ([]int32, error) {
+	result, err := r.client.SDK.GetRoleAdmins(roleID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch admins for role %d: %w", roleID, err)
+	}
+	if result == nil {
+		return nil, nil
+	}
+	users, err := client.UnmarshalUsers(result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse admins for role %d: %w", roleID, err)
+	}
+	ids := make([]int32, 0, len(users))
+	for i := range users {
+		if users[i].ID != 0 {
+			ids = append(ids, users[i].ID)
+		}
+	}
+	return ids, nil
+}
+
+// resolveAppIDsToNames converts a slice of OneLogin app IDs to their display names.
+// Results are cached on the client for the lifetime of the Terraform operation so
+// that repeated reads of different roles sharing the same apps only hit the API once.
+// Duplicate IDs are skipped. When two distinct IDs resolve to the same name, the ID
+// is appended in parentheses (e.g. "My App (4094617)") to keep Set elements unique.
+func (r *roleResource) resolveAppIDsToNames(ctx context.Context, ids []int32) ([]string, error) {
+	// Warm the cache once per Terraform operation (no-op on subsequent calls).
+	if err := r.client.PreloadAppCache(ctx); err != nil {
+		return nil, fmt.Errorf("failed to preload app cache: %w", err)
+	}
+
+	seenIDs := make(map[int32]struct{}, len(ids))
+	seenNames := make(map[string]struct{}, len(ids))
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, dup := seenIDs[id]; dup {
+			continue
+		}
+		seenIDs[id] = struct{}{}
+
+		var appName string
+		if cached, ok := r.client.CachedAppName(id); ok {
+			tflog.Debug(ctx, "resolveAppIDsToNames: cache hit", map[string]any{"app_id": id, "name": cached})
+			appName = cached
+		} else {
+			tflog.Debug(ctx, "resolveAppIDsToNames: cache miss, fetching from API", map[string]any{"app_id": id})
+			result, err := r.client.SDK.GetAppByID(int(id), nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch app ID %d: %w", id, err)
+			}
+			app, err := client.UnmarshalApp(result)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse app ID %d: %w", id, err)
+			}
+			if app == nil || app.Name == nil {
+				return nil, fmt.Errorf("app ID %d not found or has no name", id)
+			}
+			appName = *app.Name
+			tflog.Debug(ctx, "resolveAppIDsToNames: fetched and cached", map[string]any{"app_id": id, "name": appName})
+			r.client.SetCachedAppName(id, appName)
+		}
+
+		label := appName
+		if _, nameDup := seenNames[label]; nameDup {
+			label = fmt.Sprintf("%s (%d)", appName, id)
+		}
+		seenNames[label] = struct{}{}
+		names = append(names, label)
+	}
+	return names, nil
+}
+
+// resolveAppNamesToIDs converts a slice of OneLogin app display names to their IDs.
+// Each name uses GET /api/2/apps?name=<name> and picks the first exact match.
+func (r *roleResource) resolveAppNamesToIDs(ctx context.Context, names []string) ([]int32, error) {
+	ids := make([]int32, 0, len(names))
+	for _, name := range names {
+		n := name
+		result, err := r.client.SDK.GetApps(&models.AppQuery{Name: &n})
+		if err != nil {
+			return nil, fmt.Errorf("failed to query app %q: %w", name, err)
+		}
+		apps, err := client.UnmarshalApps(result)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse apps response for %q: %w", name, err)
+		}
+		var matched *int32
+		for i := range apps {
+			if apps[i].Name != nil && *apps[i].Name == name && apps[i].ID != nil {
+				matched = apps[i].ID
+				break
+			}
+		}
+		if matched == nil {
+			return nil, fmt.Errorf("app %q not found in OneLogin", name)
+		}
+		ids = append(ids, *matched)
+	}
+	return ids, nil
+}
+
+// syncAdmins resolves email addresses to user IDs, then performs differential add/remove.
 func (r *roleResource) syncAdmins(ctx context.Context, roleID int, oldState, newPlan RoleResourceModel, resp *resource.UpdateResponse) {
-	oldAdmins, d := common.SetToInt32Slice(ctx, oldState.Admins)
+	oldEmails, d := common.SetToStringSlice(ctx, oldState.Admins)
 	resp.Diagnostics.Append(d...)
-	newAdmins, d := common.SetToInt32Slice(ctx, newPlan.Admins)
+	newEmails, d := common.SetToStringSlice(ctx, newPlan.Admins)
 	resp.Diagnostics.Append(d...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	toAdd, toRemove := diffInt32Slices(oldAdmins, newAdmins)
+	oldIDs, err := r.resolveAdminEmailsToIDs(ctx, oldEmails)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving Old Admin Emails", err.Error())
+		return
+	}
+	newIDs, err := r.resolveAdminEmailsToIDs(ctx, newEmails)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving New Admin Emails", err.Error())
+		return
+	}
+
+	toAdd, toRemove := diffInt32Slices(oldIDs, newIDs)
 
 	if len(toAdd) > 0 {
 		tflog.Debug(ctx, "Adding admins to role", map[string]any{"role_id": roleID, "admins": toAdd})
@@ -352,6 +585,57 @@ func (r *roleResource) syncAdmins(ctx context.Context, roleID int, oldState, new
 			return
 		}
 	}
+}
+
+// resolveAdminIDsToEmails converts a slice of user IDs to their email addresses.
+func (r *roleResource) resolveAdminIDsToEmails(ctx context.Context, ids []int32) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	emails := make([]string, 0, len(ids))
+	for _, id := range ids {
+		result, err := r.client.SDK.GetUserByIDWithContext(ctx, int(id), nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch user ID %d: %w", id, err)
+		}
+		user, err := client.UnmarshalUser(result)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse user ID %d: %w", id, err)
+		}
+		if user == nil || user.Email == "" {
+			return nil, fmt.Errorf("user ID %d not found or has no email", id)
+		}
+		emails = append(emails, user.Email)
+	}
+	return emails, nil
+}
+
+// resolveAdminEmailsToIDs converts a slice of email addresses to user IDs.
+func (r *roleResource) resolveAdminEmailsToIDs(ctx context.Context, emails []string) ([]int32, error) {
+	ids := make([]int32, 0, len(emails))
+	for _, email := range emails {
+		e := email
+		result, err := r.client.SDK.GetUsersWithContext(ctx, &models.UserQuery{Email: &e})
+		if err != nil {
+			return nil, fmt.Errorf("failed to query user %q: %w", email, err)
+		}
+		users, err := client.UnmarshalUsers(result)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse users response for %q: %w", email, err)
+		}
+		var found bool
+		for i := range users {
+			if users[i].Email == email && users[i].ID != 0 {
+				ids = append(ids, users[i].ID)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("user with email %q not found in OneLogin", email)
+		}
+	}
+	return ids, nil
 }
 
 // diffInt32Slices returns (toAdd, toRemove) comparing old vs new slices.
