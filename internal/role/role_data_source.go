@@ -161,9 +161,15 @@ func (d *roleDataSource) Read(ctx context.Context, req datasource.ReadRequest, r
 	}
 
 	// Reuse roleResource helpers for app/admin name resolution.
+	// Note: role detail endpoint does NOT include apps/admins; use dedicated endpoints.
 	rr := &roleResource{client: d.client}
 
-	appNames, err := rr.resolveAppIDsToNames(ctx, role.Apps)
+	fetchedAppIDs, err := rr.fetchRoleAppIDs(ctx, matchedID)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Apps", err.Error())
+		return
+	}
+	appNames, err := rr.resolveAppIDsToNames(ctx, fetchedAppIDs)
 	if err != nil {
 		resp.Diagnostics.AddError("Error Resolving App IDs", err.Error())
 		return
@@ -174,7 +180,12 @@ func (d *roleDataSource) Read(ctx context.Context, req datasource.ReadRequest, r
 		return
 	}
 
-	adminEmails, err := rr.resolveAdminIDsToEmails(ctx, role.Admins)
+	fetchedAdminIDs, err := rr.fetchRoleAdminIDs(ctx, matchedID)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Admins", err.Error())
+		return
+	}
+	adminEmails, err := rr.resolveAdminIDsToEmails(ctx, fetchedAdminIDs)
 	if err != nil {
 		resp.Diagnostics.AddError("Error Resolving Admin IDs", err.Error())
 		return

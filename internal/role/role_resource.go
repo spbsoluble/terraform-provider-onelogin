@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 
@@ -57,12 +58,18 @@ func (r *roleResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Computed:    true,
 				ElementType: types.StringType,
 				Description: "A set of app names accessible by this role.",
+				PlanModifiers: []planmodifier.Set{
+					setplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"admins": schema.SetAttribute{
 				Optional:    true,
 				Computed:    true,
 				ElementType: types.StringType,
 				Description: "A set of email addresses for users who administer this role.",
+				PlanModifiers: []planmodifier.Set{
+					setplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
@@ -163,8 +170,13 @@ func (r *roleResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
-	// Store app names (not IDs) in state.
-	resolvedNames, err := r.resolveAppIDsToNames(ctx, role.Apps)
+	// Fetch apps and admins via dedicated endpoints (not included in role detail response).
+	fetchedAppIDs, err := r.fetchRoleAppIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Apps", err.Error())
+		return
+	}
+	resolvedNames, err := r.resolveAppIDsToNames(ctx, fetchedAppIDs)
 	if err != nil {
 		resp.Diagnostics.AddError("Error Resolving App IDs to Names", err.Error())
 		return
@@ -175,8 +187,12 @@ func (r *roleResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
-	// Store admin emails (not IDs) in state.
-	resolvedAdminEmails, err := r.resolveAdminIDsToEmails(ctx, role.Admins)
+	fetchedAdminIDs, err := r.fetchRoleAdminIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Admins", err.Error())
+		return
+	}
+	resolvedAdminEmails, err := r.resolveAdminIDsToEmails(ctx, fetchedAdminIDs)
 	if err != nil {
 		resp.Diagnostics.AddError("Error Resolving Admin IDs to Emails", err.Error())
 		return
@@ -224,10 +240,15 @@ func (r *roleResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		return
 	}
 
-	tflog.Debug(ctx, "Read: role fetched, resolving app names", map[string]any{"id": id, "app_count": len(role.Apps)})
+	// Fetch apps and admins via dedicated endpoints (not included in role detail response).
+	fetchedAppIDs, err := r.fetchRoleAppIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Apps", err.Error())
+		return
+	}
+	tflog.Debug(ctx, "Read: fetched role app IDs", map[string]any{"id": id, "app_count": len(fetchedAppIDs)})
 
-	// Resolve app IDs → names for human-readable diffs.
-	appNames, err := r.resolveAppIDsToNames(ctx, role.Apps)
+	appNames, err := r.resolveAppIDsToNames(ctx, fetchedAppIDs)
 	if err != nil {
 		resp.Diagnostics.AddError("Error Resolving App IDs to Names", err.Error())
 		return
@@ -241,8 +262,12 @@ func (r *roleResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		return
 	}
 
-	// Resolve admin IDs → emails for human-readable diffs.
-	adminEmails, err := r.resolveAdminIDsToEmails(ctx, role.Admins)
+	fetchedAdminIDs, err := r.fetchRoleAdminIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Admins", err.Error())
+		return
+	}
+	adminEmails, err := r.resolveAdminIDsToEmails(ctx, fetchedAdminIDs)
 	if err != nil {
 		resp.Diagnostics.AddError("Error Resolving Admin IDs to Emails", err.Error())
 		return
@@ -329,8 +354,13 @@ func (r *roleResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	// Resolve app IDs → names for state.
-	resolvedNames, err := r.resolveAppIDsToNames(ctx, role.Apps)
+	// Fetch apps and admins via dedicated endpoints (not included in role detail response).
+	fetchedAppIDs, err := r.fetchRoleAppIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Apps", err.Error())
+		return
+	}
+	resolvedNames, err := r.resolveAppIDsToNames(ctx, fetchedAppIDs)
 	if err != nil {
 		resp.Diagnostics.AddError("Error Resolving App IDs to Names", err.Error())
 		return
@@ -341,8 +371,12 @@ func (r *roleResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	// Resolve admin IDs → emails for state.
-	adminEmails, err := r.resolveAdminIDsToEmails(ctx, role.Admins)
+	fetchedAdminIDs, err := r.fetchRoleAdminIDs(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Fetching Role Admins", err.Error())
+		return
+	}
+	adminEmails, err := r.resolveAdminIDsToEmails(ctx, fetchedAdminIDs)
 	if err != nil {
 		resp.Diagnostics.AddError("Error Resolving Admin IDs to Emails", err.Error())
 		return
@@ -382,6 +416,52 @@ func (r *roleResource) ImportState(ctx context.Context, req resource.ImportState
 	}
 
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
+}
+
+// fetchRoleAppIDs calls GET /api/2/roles/{id}/apps to get the app IDs for a role.
+// The role detail endpoint (GET /api/2/roles/{id}) does NOT include apps or admins.
+func (r *roleResource) fetchRoleAppIDs(ctx context.Context, roleID int) ([]int32, error) {
+	result, err := r.client.SDK.GetRoleApps(roleID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch apps for role %d: %w", roleID, err)
+	}
+	if result == nil {
+		return nil, nil
+	}
+	apps, err := client.UnmarshalApps(result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse apps for role %d: %w", roleID, err)
+	}
+	ids := make([]int32, 0, len(apps))
+	for i := range apps {
+		if apps[i].ID != nil {
+			ids = append(ids, *apps[i].ID)
+		}
+	}
+	return ids, nil
+}
+
+// fetchRoleAdminIDs calls GET /api/2/roles/{id}/admins to get the admin user IDs for a role.
+// The role detail endpoint (GET /api/2/roles/{id}) does NOT include apps or admins.
+func (r *roleResource) fetchRoleAdminIDs(ctx context.Context, roleID int) ([]int32, error) {
+	result, err := r.client.SDK.GetRoleAdmins(roleID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch admins for role %d: %w", roleID, err)
+	}
+	if result == nil {
+		return nil, nil
+	}
+	users, err := client.UnmarshalUsers(result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse admins for role %d: %w", roleID, err)
+	}
+	ids := make([]int32, 0, len(users))
+	for i := range users {
+		if users[i].ID != 0 {
+			ids = append(ids, users[i].ID)
+		}
+	}
+	return ids, nil
 }
 
 // resolveAppIDsToNames converts a slice of OneLogin app IDs to their display names.
