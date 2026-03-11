@@ -19,15 +19,19 @@ resource "onelogin_user_mapping" "example" {
   enabled = true
 
   conditions {
-    source   = "email"
-    operator = "contains"
-    value    = "@engineering.example.com"
+    source   = "member_of"
+    operator = "~"
+    value    = "eng_all_staff"
   }
 
   actions {
-    action = "add_role"
-    value  = [tostring(onelogin_role.engineering.id)]
+    action = "set_role"
+    value  = [tostring(data.onelogin_role.engineering.id)]
   }
+}
+
+data "onelogin_role" "engineering" {
+  name = "Engineering"
 }
 ```
 
@@ -64,7 +68,7 @@ Required:
 
 Required:
 
-- `operator` (String) The comparison operator (e.g., "contains", "=").
+- `operator` (String) The comparison operator. Common values: `~` (contains), `=` (equals), `!=` (not equals), `!~` (does not contain).
 - `source` (String) The source field to evaluate (e.g., "email").
 - `value` (String) The value to compare against.
 

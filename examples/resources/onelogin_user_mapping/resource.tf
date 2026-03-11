@@ -1,16 +1,21 @@
+data "onelogin_role" "engineering" {
+  name = "Engineering"
+}
+
 resource "onelogin_user_mapping" "example" {
   name    = "Auto-assign Engineering Role"
-  match   = "all"
+  match   = "any"
   enabled = true
 
+  # operator "~" means "contains" in the OneLogin API
   conditions {
-    source   = "email"
-    operator = "contains"
-    value    = "@engineering.example.com"
+    source   = "member_of"
+    operator = "~"
+    value    = "eng_all_staff"
   }
 
   actions {
-    action = "add_role"
-    value  = [tostring(onelogin_role.engineering.id)]
+    action = "set_role"
+    value  = [tostring(data.onelogin_role.engineering.id)]
   }
 }
