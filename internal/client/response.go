@@ -8,9 +8,15 @@ import (
 )
 
 // UnmarshalRole converts an SDK interface{} response to a *models.Role.
+// The "users" field is stripped before marshaling — roles can have tens of thousands
+// of members (e.g. 38K+ for POC business tiers) which causes minutes-long JSON processing.
+// Role membership is managed via OneLogin mappings, not Terraform.
 func UnmarshalRole(data interface{}) (*models.Role, error) {
 	if data == nil {
 		return nil, nil
+	}
+	if m, ok := data.(map[string]interface{}); ok {
+		delete(m, "users")
 	}
 	b, err := json.Marshal(data)
 	if err != nil {
@@ -69,6 +75,38 @@ func UnmarshalApps(data interface{}) ([]models.App, error) {
 		return nil, fmt.Errorf("failed to unmarshal apps: %w", err)
 	}
 	return apps, nil
+}
+
+// UnmarshalUser converts an SDK interface{} response to a *models.User.
+func UnmarshalUser(data interface{}) (*models.User, error) {
+	if data == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal user response: %w", err)
+	}
+	var user models.User
+	if err := json.Unmarshal(b, &user); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user: %w", err)
+	}
+	return &user, nil
+}
+
+// UnmarshalUsers converts an SDK interface{} response to a slice of models.User.
+func UnmarshalUsers(data interface{}) ([]models.User, error) {
+	if data == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal users response: %w", err)
+	}
+	var users []models.User
+	if err := json.Unmarshal(b, &users); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal users: %w", err)
+	}
+	return users, nil
 }
 
 // OIDCConfig represents the OIDC configuration with polymorphic redirect_uri handling.
