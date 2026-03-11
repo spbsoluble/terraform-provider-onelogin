@@ -70,6 +70,28 @@ func TestAccRolesDataSource_withNameFilter(t *testing.T) {
 	})
 }
 
+func TestAccRoleDataSource_byName(t *testing.T) {
+	rName := acctest.RandomWithPrefix("tf-acc-role-ds-name")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccRoleDataSourceConfig_byName(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("data.onelogin_role.test", "name", rName),
+					resource.TestCheckResourceAttrSet("data.onelogin_role.test", "id"),
+					resource.TestCheckResourceAttrPair(
+						"data.onelogin_role.test", "id",
+						"onelogin_role.test", "id",
+					),
+				),
+			},
+		},
+	})
+}
+
 func testAccRoleDataSourceConfig(name string) string {
 	return fmt.Sprintf(`
 resource "onelogin_role" "test" {
@@ -78,6 +100,19 @@ resource "onelogin_role" "test" {
 
 data "onelogin_role" "test" {
   id = onelogin_role.test.id
+}
+`, name)
+}
+
+func testAccRoleDataSourceConfig_byName(name string) string {
+	return fmt.Sprintf(`
+resource "onelogin_role" "test" {
+  name = %[1]q
+}
+
+data "onelogin_role" "test" {
+  name       = onelogin_role.test.name
+  depends_on = [onelogin_role.test]
 }
 `, name)
 }
