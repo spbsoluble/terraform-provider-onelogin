@@ -517,7 +517,9 @@ func (r *roleResource) resolveAppIDsToNames(ctx context.Context, ids []int32) ([
 }
 
 // resolveAppNamesToIDs converts a slice of OneLogin app display names to their IDs.
-// Each name uses GET /api/2/apps?name=<name> and picks the first exact match.
+// Each name uses GET /api/2/apps?name=<name> and collects all exact matches.
+// Returns an error if more than one app has the same name (ambiguous — include IDs
+// so the operator can identify and remove the duplicate in OneLogin).
 func (r *roleResource) resolveAppNamesToIDs(ctx context.Context, names []string) ([]int32, error) {
 	ids := make([]int32, 0, len(names))
 	for _, name := range names {
@@ -530,17 +532,20 @@ func (r *roleResource) resolveAppNamesToIDs(ctx context.Context, names []string)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse apps response for %q: %w", name, err)
 		}
-		var matched *int32
+		var matches []int32
 		for i := range apps {
 			if apps[i].Name != nil && *apps[i].Name == name && apps[i].ID != nil {
-				matched = apps[i].ID
-				break
+				matches = append(matches, *apps[i].ID)
 			}
 		}
-		if matched == nil {
+		switch len(matches) {
+		case 0:
 			return nil, fmt.Errorf("app %q not found in OneLogin", name)
+		case 1:
+			ids = append(ids, matches[0])
+		default:
+			return nil, fmt.Errorf("app %q is ambiguous: %d apps share this name (IDs: %v) — delete the duplicate in OneLogin before applying", name, len(matches), matches)
 		}
-		ids = append(ids, *matched)
 	}
 	return ids, nil
 }
