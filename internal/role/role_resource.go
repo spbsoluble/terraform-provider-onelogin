@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -60,8 +61,8 @@ func (r *roleResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 			"apps": schema.SetAttribute{
 				Optional:    true,
 				Computed:    true,
-				ElementType: types.Int64Type,
-				Description: "A set of app IDs accessible by this role.",
+				ElementType: types.StringType,
+				Description: "A set of app names accessible by this role.",
 			},
 			"admins": schema.SetAttribute{
 				Optional:    true,
@@ -96,11 +97,24 @@ func (r *roleResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
+	// Resolve app names → IDs before sending to the API.
+	appNames, d := common.SetToStringSlice(ctx, plan.Apps)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	appIDs, err := r.resolveAppNamesToIDs(ctx, appNames)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving App Names", err.Error())
+		return
+	}
+
 	sdkRole, diags := plan.ToSDKRole(ctx)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	sdkRole.Apps = appIDs
 
 	tflog.Debug(ctx, "Creating role", map[string]any{"name": plan.Name.ValueString()})
 
@@ -146,6 +160,18 @@ func (r *roleResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
+	// Store app names (not IDs) in state.
+	resolvedNames, err := r.resolveAppIDsToNames(ctx, role.Apps)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving App IDs to Names", err.Error())
+		return
+	}
+	state.Apps, d = common.StringSliceToSet(ctx, resolvedNames)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	diags = resp.State.Set(ctx, &state)
 	resp.Diagnostics.Append(diags...)
 }
@@ -183,6 +209,19 @@ func (r *roleResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		return
 	}
 
+	// Resolve app IDs → names for human-readable diffs.
+	appNames, err := r.resolveAppIDsToNames(ctx, role.Apps)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving App IDs to Names", err.Error())
+		return
+	}
+	var d diag.Diagnostics
+	state.Apps, d = common.StringSliceToSet(ctx, appNames)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	diags = resp.State.Set(ctx, &state)
 	resp.Diagnostics.Append(diags...)
 }
@@ -215,14 +254,19 @@ func (r *roleResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	// Step 2: Sync apps via dedicated endpoint
-	planApps, d := common.SetToInt32Slice(ctx, plan.Apps)
+	// Step 2: Resolve app names → IDs and sync via dedicated endpoint.
+	planAppNames, d := common.SetToStringSlice(ctx, plan.Apps)
 	resp.Diagnostics.Append(d...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if planApps != nil {
-		_, err = r.client.SDK.UpdateRoleApps(id, common.Int32SliceToIntSlice(planApps))
+	if planAppNames != nil {
+		planAppIDs, err := r.resolveAppNamesToIDs(ctx, planAppNames)
+		if err != nil {
+			resp.Diagnostics.AddError("Error Resolving App Names", err.Error())
+			return
+		}
+		_, err = r.client.SDK.UpdateRoleApps(id, common.Int32SliceToIntSlice(planAppIDs))
 		if err != nil {
 			resp.Diagnostics.AddError("Error Updating Role Apps", err.Error())
 			return
@@ -261,6 +305,18 @@ func (r *roleResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
+	// Resolve app IDs → names for state.
+	resolvedNames, err := r.resolveAppIDsToNames(ctx, role.Apps)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Resolving App IDs to Names", err.Error())
+		return
+	}
+	newState.Apps, d = common.StringSliceToSet(ctx, resolvedNames)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	diags = resp.State.Set(ctx, &newState)
 	resp.Diagnostics.Append(diags...)
 }
@@ -290,6 +346,70 @@ func (r *roleResource) ImportState(ctx context.Context, req resource.ImportState
 	}
 
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
+}
+
+// resolveAppIDsToNames converts a slice of OneLogin app IDs to their display names.
+// Each ID requires one API call (GET /api/2/apps/{id}).
+// Duplicate IDs are skipped. When two distinct IDs resolve to the same name, the ID
+// is appended in parentheses (e.g. "My App (4094617)") to keep Set elements unique
+// and make the diff readable.
+func (r *roleResource) resolveAppIDsToNames(ctx context.Context, ids []int32) ([]string, error) {
+	seenIDs := make(map[int32]struct{}, len(ids))
+	seenNames := make(map[string]struct{}, len(ids))
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, dup := seenIDs[id]; dup {
+			continue
+		}
+		seenIDs[id] = struct{}{}
+		result, err := r.client.SDK.GetAppByID(int(id), nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch app ID %d: %w", id, err)
+		}
+		app, err := client.UnmarshalApp(result)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse app ID %d: %w", id, err)
+		}
+		if app == nil || app.Name == nil {
+			return nil, fmt.Errorf("app ID %d not found or has no name", id)
+		}
+		label := *app.Name
+		if _, nameDup := seenNames[label]; nameDup {
+			label = fmt.Sprintf("%s (%d)", *app.Name, id)
+		}
+		seenNames[label] = struct{}{}
+		names = append(names, label)
+	}
+	return names, nil
+}
+
+// resolveAppNamesToIDs converts a slice of OneLogin app display names to their IDs.
+// Each name uses GET /api/2/apps?name=<name> and picks the first exact match.
+func (r *roleResource) resolveAppNamesToIDs(ctx context.Context, names []string) ([]int32, error) {
+	ids := make([]int32, 0, len(names))
+	for _, name := range names {
+		n := name
+		result, err := r.client.SDK.GetApps(&models.AppQuery{Name: &n})
+		if err != nil {
+			return nil, fmt.Errorf("failed to query app %q: %w", name, err)
+		}
+		apps, err := client.UnmarshalApps(result)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse apps response for %q: %w", name, err)
+		}
+		var matched *int32
+		for i := range apps {
+			if apps[i].Name != nil && *apps[i].Name == name && apps[i].ID != nil {
+				matched = apps[i].ID
+				break
+			}
+		}
+		if matched == nil {
+			return nil, fmt.Errorf("app %q not found in OneLogin", name)
+		}
+		ids = append(ids, *matched)
+	}
+	return ids, nil
 }
 
 // syncUsers performs differential add/remove of users on a role.

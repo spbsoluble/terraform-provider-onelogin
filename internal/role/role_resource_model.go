@@ -21,6 +21,7 @@ type RoleResourceModel struct {
 }
 
 // ToSDKRole converts the Terraform model to the SDK Role struct.
+// Note: apps are handled separately at the resource level (name→ID resolution required).
 func (m *RoleResourceModel) ToSDKRole(ctx context.Context) (*models.Role, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
@@ -37,10 +38,6 @@ func (m *RoleResourceModel) ToSDKRole(ctx context.Context) (*models.Role, diag.D
 	diags.Append(d...)
 	role.Users = users
 
-	apps, d := common.SetToInt32Slice(ctx, m.Apps)
-	diags.Append(d...)
-	role.Apps = apps
-
 	admins, d := common.SetToInt32Slice(ctx, m.Admins)
 	diags.Append(d...)
 	role.Admins = admins
@@ -49,6 +46,7 @@ func (m *RoleResourceModel) ToSDKRole(ctx context.Context) (*models.Role, diag.D
 }
 
 // FromSDKRole populates the Terraform model from an SDK Role struct.
+// Note: apps are NOT populated here — the resource populates them after resolving IDs to names.
 func (m *RoleResourceModel) FromSDKRole(ctx context.Context, role *models.Role) diag.Diagnostics {
 	var diags diag.Diagnostics
 
@@ -58,10 +56,6 @@ func (m *RoleResourceModel) FromSDKRole(ctx context.Context, role *models.Role) 
 	users, d := common.Int32SliceToSet(ctx, role.Users)
 	diags.Append(d...)
 	m.Users = users
-
-	apps, d := common.Int32SliceToSet(ctx, role.Apps)
-	diags.Append(d...)
-	m.Apps = apps
 
 	admins, d := common.Int32SliceToSet(ctx, role.Admins)
 	diags.Append(d...)
