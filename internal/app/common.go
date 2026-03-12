@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"sort"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -10,6 +11,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -56,7 +58,7 @@ type BaseAppModel struct {
 	CreatedAt          types.String `tfsdk:"created_at"`
 	RoleIDs            types.Set    `tfsdk:"role_ids"`
 	Provisioning       types.Object `tfsdk:"provisioning"`
-	Parameters         types.Set    `tfsdk:"parameters"`
+	Parameters         types.List   `tfsdk:"parameters"`
 }
 
 // BaseAppSchemaAttributes returns the shared schema attributes for all app types.
@@ -185,13 +187,13 @@ func ProvisioningBlock() schema.SingleNestedAttribute {
 }
 
 // ParametersBlock returns the parameters nested block schema.
-func ParametersBlock() schema.SetNestedAttribute {
-	return schema.SetNestedAttribute{
+func ParametersBlock() schema.ListNestedAttribute {
+	return schema.ListNestedAttribute{
 		Optional:    true,
 		Computed:    true,
 		Description: "Application parameters.",
-		PlanModifiers: []planmodifier.Set{
-			setplanmodifier.UseStateForUnknown(),
+		PlanModifiers: []planmodifier.List{
+			listplanmodifier.UseStateForUnknown(),
 		},
 		NestedObject: schema.NestedAttributeObject{
 			Attributes: map[string]schema.Attribute{
@@ -218,22 +220,18 @@ func ParametersBlock() schema.SetNestedAttribute {
 				},
 				"user_attribute_macros": schema.StringAttribute{
 					Optional:    true,
-					Computed:    true,
 					Description: "Macro expression for user attribute.",
 				},
 				"attributes_transformations": schema.StringAttribute{
 					Optional:    true,
-					Computed:    true,
 					Description: "Attribute transformation rules.",
 				},
 				"default_values": schema.StringAttribute{
 					Optional:    true,
-					Computed:    true,
 					Description: "Default value for the parameter.",
 				},
 				"values": schema.StringAttribute{
 					Optional:    true,
-					Computed:    true,
 					Description: "The parameter value.",
 				},
 				"skip_if_blank": schema.BoolAttribute{
@@ -330,7 +328,7 @@ func BaseAppFromSDK(ctx context.Context, m *BaseAppModel, app *models.App) diag.
 	m.Name = common.StringPtrToString(app.Name)
 	m.ConnectorID = common.Int32PtrToInt64(app.ConnectorID)
 	m.Description = common.StringPtrToString(app.Description)
-	m.Notes = common.StringPtrToString(app.Notes)
+	m.Notes = common.NormalizeAppNotes(app.Notes)
 	m.Visible = common.BoolPtrToBool(app.Visible)
 	m.AllowAssumedSignin = common.BoolPtrToBool(app.AllowAssumedSignin)
 	m.BrandID = common.IntPtrToInt64(app.BrandID)
@@ -364,7 +362,7 @@ func BaseAppFromSDK(ctx context.Context, m *BaseAppModel, app *models.App) diag.
 	return diags
 }
 
-func parametersToSDK(ctx context.Context, params types.Set) (*map[string]models.Parameter, diag.Diagnostics) {
+func parametersToSDK(ctx context.Context, params types.List) (*map[string]models.Parameter, diag.Diagnostics) {
 	if params.IsNull() || params.IsUnknown() {
 		return nil, nil
 	}
@@ -408,20 +406,30 @@ func parametersToSDK(ctx context.Context, params types.Set) (*map[string]models.
 	return &result, nil
 }
 
-func parametersFromSDK(ctx context.Context, params *map[string]models.Parameter) (types.Set, diag.Diagnostics) {
+func parametersFromSDK(ctx context.Context, params *map[string]models.Parameter) (types.List, diag.Diagnostics) {
 	if params == nil || len(*params) == 0 {
-		return types.SetValueMust(types.ObjectType{AttrTypes: ParameterAttrTypes()}, []attr.Value{}), nil
+		return types.ListValueMust(types.ObjectType{AttrTypes: ParameterAttrTypes()}, []attr.Value{}), nil
 	}
 
 	var diags diag.Diagnostics
+
+	// Sort parameter keys alphabetically so the list is always in a
+	// deterministic order regardless of how the API returns them.
+	keys := make([]string, 0, len(*params))
+	for key := range *params {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
 	elems := make([]attr.Value, 0, len(*params))
 
-	for key, p := range *params {
+	for _, key := range keys {
+		p := (*params)[key]
 		obj, d := types.ObjectValue(ParameterAttrTypes(), map[string]attr.Value{
 			"param_key_name":             types.StringValue(key),
 			"param_id":                   types.Int64Value(int64(p.ID)),
 			"label":                      types.StringValue(p.Label),
-			"user_attribute_mappings":    common.InterfaceToString(p.UserAttributeMappings),
+			"user_attribute_mappings":    common.InterfaceToStringOrEmpty(p.UserAttributeMappings),
 			"user_attribute_macros":      common.InterfaceToString(p.UserAttributeMacros),
 			"attributes_transformations": common.InterfaceToString(p.AttributesTransformations),
 			"default_values":             common.InterfaceToString(p.DefaultValues),
@@ -434,7 +442,7 @@ func parametersFromSDK(ctx context.Context, params *map[string]models.Parameter)
 		elems = append(elems, obj)
 	}
 
-	result, d := types.SetValue(types.ObjectType{AttrTypes: ParameterAttrTypes()}, elems)
+	result, d := types.ListValue(types.ObjectType{AttrTypes: ParameterAttrTypes()}, elems)
 	diags.Append(d...)
 	return result, diags
 }
@@ -443,7 +451,7 @@ func parametersFromSDK(ctx context.Context, params *map[string]models.Parameter)
 // whose param_key_name matches a key from the reference set. This prevents server-added
 // default parameters from causing plan inconsistencies. If refParams is null/unknown,
 // the full apiParams set is returned unchanged.
-func FilterParametersByKnownKeys(ctx context.Context, refParams types.Set, apiParams types.Set) (types.Set, diag.Diagnostics) {
+func FilterParametersByKnownKeys(ctx context.Context, refParams types.List, apiParams types.List) (types.List, diag.Diagnostics) {
 	if refParams.IsNull() || refParams.IsUnknown() {
 		return apiParams, nil
 	}
@@ -457,22 +465,31 @@ func FilterParametersByKnownKeys(ctx context.Context, refParams types.Set, apiPa
 	if diags.HasError() {
 		return apiParams, diags
 	}
-	knownKeys := make(map[string]bool, len(refModels))
-	for _, pm := range refModels {
-		knownKeys[pm.ParamKeyName.ValueString()] = true
-	}
-
-	// Filter API parameters to only include known keys
+	// Build a map from param_key_name -> API param for quick lookup.
 	var apiModels []ParameterModel
 	d = apiParams.ElementsAs(ctx, &apiModels, false)
 	diags.Append(d...)
 	if diags.HasError() {
 		return apiParams, diags
 	}
-
-	filtered := make([]attr.Value, 0, len(apiModels))
+	apiByKey := make(map[string]ParameterModel, len(apiModels))
 	for _, pm := range apiModels {
-		if !knownKeys[pm.ParamKeyName.ValueString()] {
+		apiByKey[pm.ParamKeyName.ValueString()] = pm
+	}
+
+	// Collect the set of known keys from the reference (config/prev-state) in
+	// alphabetical order so the output list is always deterministically sorted.
+	knownKeys := make([]string, 0, len(refModels))
+	for _, pm := range refModels {
+		knownKeys = append(knownKeys, pm.ParamKeyName.ValueString())
+	}
+	sort.Strings(knownKeys)
+
+	// Build the filtered list in sorted order, using API values where available.
+	filtered := make([]attr.Value, 0, len(knownKeys))
+	for _, key := range knownKeys {
+		pm, ok := apiByKey[key]
+		if !ok {
 			continue
 		}
 		obj, d := types.ObjectValue(ParameterAttrTypes(), map[string]attr.Value{
@@ -493,10 +510,10 @@ func FilterParametersByKnownKeys(ctx context.Context, refParams types.Set, apiPa
 	}
 
 	if len(filtered) == 0 {
-		return types.SetValueMust(types.ObjectType{AttrTypes: ParameterAttrTypes()}, []attr.Value{}), diags
+		return types.ListValueMust(types.ObjectType{AttrTypes: ParameterAttrTypes()}, []attr.Value{}), diags
 	}
 
-	result, d := types.SetValue(types.ObjectType{AttrTypes: ParameterAttrTypes()}, filtered)
+	result, d := types.ListValue(types.ObjectType{AttrTypes: ParameterAttrTypes()}, filtered)
 	diags.Append(d...)
 	return result, diags
 }

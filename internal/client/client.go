@@ -74,3 +74,16 @@ func (c *Client) CachedAppName(appID int32) (string, bool) {
 func (c *Client) SetCachedAppName(appID int32, name string) {
 	c.appNameCache.Store(appID, name)
 }
+
+// AppNameAmbiguous returns true if more than one cached app shares the given
+// display name. PreloadAppCache must have been called before this is meaningful.
+func (c *Client) AppNameAmbiguous(name string) bool {
+	count := 0
+	c.appNameCache.Range(func(_, v any) bool {
+		if v.(string) == name {
+			count++
+		}
+		return count < 2 // stop early once ambiguity is confirmed
+	})
+	return count > 1
+}

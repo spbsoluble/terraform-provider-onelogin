@@ -239,7 +239,9 @@ provisioning = {
 }
 ```
 
-**`parameters` attribute (optional):**
+**`parameters` attribute (optional, list):**
+
+Parameters are a **list** — elements are matched positionally between config and state. Sort parameters by `param_key_name` to ensure consistent ordering. When using `generate-tf-applications` with API credentials, all parameters (including API-injected ones) are automatically sorted and included.
 
 ```hcl
 parameters = [
@@ -248,7 +250,14 @@ parameters = [
     label                     = "Email"
     user_attribute_mappings   = "email"
     include_in_saml_assertion = true
-  }
+  },
+  {
+    param_key_name            = "firstname"
+    label                     = "First Name"
+    user_attribute_mappings   = "firstname"
+    include_in_saml_assertion = true
+    skip_if_blank             = true
+  },
 ]
 ```
 
