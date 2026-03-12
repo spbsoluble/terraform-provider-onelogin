@@ -67,7 +67,7 @@ func (d *roleDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, r
 			"apps": schema.SetAttribute{
 				Computed:    true,
 				ElementType: types.StringType,
-				Description: "A set of app names accessible by this role.",
+				Description: "A set of app names accessible by this role. Ambiguous apps (multiple OneLogin apps share the same name) are represented as numeric ID strings.",
 			},
 			"admins": schema.SetAttribute{
 				Computed:    true,

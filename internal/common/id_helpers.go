@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -32,7 +33,36 @@ func StringPtrToString(v *string) types.String {
 	if v == nil {
 		return types.StringNull()
 	}
-	return types.StringValue(*v)
+	// Normalize \r\n to \n — OneLogin API may return either line ending.
+	return types.StringValue(strings.ReplaceAll(*v, "\r\n", "\n"))
+}
+
+// NormalizeAppNotes strips the YAML list front matter that the legacy API-based
+// management tool serialized notes with (e.g. "--- \n- Note text\n"). This prevents
+// spurious drift when migrating apps from API management to Terraform management.
+func NormalizeAppNotes(v *string) types.String {
+	if v == nil {
+		return types.StringNull()
+	}
+	s := *v
+	// Normalize \r\n to \n before checking prefix — OneLogin API may return
+	// either line ending depending on how the notes were originally set.
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	// Legacy format: "--- \n- Line one\n- Line two\n"
+	// Strip the leading "--- \n" and join "- " prefixed lines.
+	if strings.HasPrefix(s, "--- \n") {
+		var lines []string
+		for _, line := range strings.Split(strings.TrimPrefix(s, "--- \n"), "\n") {
+			line = strings.TrimSuffix(line, "\r")
+			if strings.HasPrefix(line, "- ") {
+				lines = append(lines, strings.TrimPrefix(line, "- "))
+			} else if line != "" {
+				lines = append(lines, line)
+			}
+		}
+		s = strings.Join(lines, "\n")
+	}
+	return types.StringValue(s)
 }
 
 // StringToStringPtr converts types.String to *string.
@@ -183,6 +213,20 @@ func StringSliceToSet(ctx context.Context, vals []string) (types.Set, diag.Diagn
 	return types.SetValue(types.StringType, elems)
 }
 
+// InterfaceToStringOrEmpty converts an interface{} value to types.String,
+// returning an empty string (not null) when the value is nil or empty.
+func InterfaceToStringOrEmpty(v interface{}) types.String {
+	if v == nil {
+		return types.StringValue("")
+	}
+	switch val := v.(type) {
+	case string:
+		return types.StringValue(val)
+	default:
+		return types.StringValue(fmt.Sprintf("%v", val))
+	}
+}
+
 // InterfaceToString converts an interface{} value to types.String.
 func InterfaceToString(v interface{}) types.String {
 	if v == nil {
@@ -190,8 +234,19 @@ func InterfaceToString(v interface{}) types.String {
 	}
 	switch val := v.(type) {
 	case string:
+		if val == "" {
+			return types.StringNull()
+		}
 		return types.StringValue(val)
 	default:
-		return types.StringValue(fmt.Sprintf("%v", val))
+		// Slices (e.g. default_values from the API) are formatted as "[elem1 elem2 ...]".
+		// An empty slice or a slice containing only empty strings both render as "[]",
+		// which is functionally "no value" — normalize to null so that config attributes
+		// left unset don't create spurious drift against state.
+		s := fmt.Sprintf("%v", val)
+		if s == "[]" {
+			return types.StringNull()
+		}
+		return types.StringValue(s)
 	}
 }

@@ -3,6 +3,7 @@ package role
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -57,7 +58,7 @@ func (r *roleResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Optional:    true,
 				Computed:    true,
 				ElementType: types.StringType,
-				Description: "A set of app names accessible by this role.",
+				Description: "A set of app names accessible by this role. A bare integer string (e.g. \"12345\") is treated as a direct app ID, which can be used to resolve ambiguity when multiple apps share the same name.",
 				PlanModifiers: []planmodifier.Set{
 					setplanmodifier.UseStateForUnknown(),
 				},
@@ -467,8 +468,11 @@ func (r *roleResource) fetchRoleAdminIDs(ctx context.Context, roleID int) ([]int
 // resolveAppIDsToNames converts a slice of OneLogin app IDs to their display names.
 // Results are cached on the client for the lifetime of the Terraform operation so
 // that repeated reads of different roles sharing the same apps only hit the API once.
-// Duplicate IDs are skipped. When two distinct IDs resolve to the same name, the ID
-// is appended in parentheses (e.g. "My App (4094617)") to keep Set elements unique.
+// Duplicate IDs are skipped. When a name is shared by multiple apps in OneLogin
+// (globally ambiguous), the numeric ID string is returned instead of the name — this
+// ensures state round-trips cleanly when the operator used an ID in their config to
+// resolve the ambiguity. When two IDs within the same role resolve to the same unique
+// name, the ID is appended in parentheses (e.g. "My App (4094617)") as a fallback.
 func (r *roleResource) resolveAppIDsToNames(ctx context.Context, ids []int32) ([]string, error) {
 	// Warm the cache once per Terraform operation (no-op on subsequent calls).
 	if err := r.client.PreloadAppCache(ctx); err != nil {
@@ -506,9 +510,17 @@ func (r *roleResource) resolveAppIDsToNames(ctx context.Context, ids []int32) ([
 			r.client.SetCachedAppName(id, appName)
 		}
 
-		label := appName
-		if _, nameDup := seenNames[label]; nameDup {
-			label = fmt.Sprintf("%s (%d)", appName, id)
+		var label string
+		if r.client.AppNameAmbiguous(appName) {
+			// Name is shared by multiple apps in OneLogin — store the numeric ID
+			// string so state round-trips cleanly when the operator used an ID in
+			// their config to resolve the ambiguity.
+			label = strconv.FormatInt(int64(id), 10)
+		} else {
+			label = appName
+			if _, nameDup := seenNames[label]; nameDup {
+				label = fmt.Sprintf("%s (%d)", appName, id)
+			}
 		}
 		seenNames[label] = struct{}{}
 		names = append(names, label)
@@ -516,11 +528,21 @@ func (r *roleResource) resolveAppIDsToNames(ctx context.Context, ids []int32) ([
 	return names, nil
 }
 
-// resolveAppNamesToIDs converts a slice of OneLogin app display names to their IDs.
-// Each name uses GET /api/2/apps?name=<name> and picks the first exact match.
+// resolveAppNamesToIDs converts a slice of OneLogin app display names (or numeric ID
+// strings) to their IDs. If a value is a bare integer string (e.g. "12345") it is
+// used as a direct app ID without a name lookup — this lets operators resolve
+// duplicate-name ambiguity without deleting apps. For name strings, GET
+// /api/2/apps?name=<name> is used and all exact matches are collected; an error is
+// returned if more than one app shares the name.
 func (r *roleResource) resolveAppNamesToIDs(ctx context.Context, names []string) ([]int32, error) {
 	ids := make([]int32, 0, len(names))
 	for _, name := range names {
+		// If the value is a bare integer, treat it as a direct app ID.
+		if id64, err := strconv.ParseInt(name, 10, 32); err == nil {
+			ids = append(ids, int32(id64))
+			continue
+		}
+
 		n := name
 		result, err := r.client.SDK.GetApps(&models.AppQuery{Name: &n})
 		if err != nil {
@@ -530,17 +552,20 @@ func (r *roleResource) resolveAppNamesToIDs(ctx context.Context, names []string)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse apps response for %q: %w", name, err)
 		}
-		var matched *int32
+		var matches []int32
 		for i := range apps {
 			if apps[i].Name != nil && *apps[i].Name == name && apps[i].ID != nil {
-				matched = apps[i].ID
-				break
+				matches = append(matches, *apps[i].ID)
 			}
 		}
-		if matched == nil {
+		switch len(matches) {
+		case 0:
 			return nil, fmt.Errorf("app %q not found in OneLogin", name)
+		case 1:
+			ids = append(ids, matches[0])
+		default:
+			return nil, fmt.Errorf("app %q is ambiguous: %d apps share this name (IDs: %v) — delete the duplicate in OneLogin before applying", name, len(matches), matches)
 		}
-		ids = append(ids, *matched)
 	}
 	return ids, nil
 }

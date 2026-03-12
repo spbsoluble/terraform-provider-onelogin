@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	models "github.com/onelogin/onelogin-go-sdk/v4/pkg/onelogin/models"
 )
@@ -143,10 +144,17 @@ func ExtractAppConfigOIDC(config interface{}) (*OIDCConfig, error) {
 		if err := json.Unmarshal(cfg.RedirectURIRaw, &uris); err == nil {
 			cfg.RedirectURIs = uris
 		} else {
-			// Fall back to string (may be newline or comma separated)
+			// Fall back to string (may be newline-separated)
 			var s string
 			if err := json.Unmarshal(cfg.RedirectURIRaw, &s); err == nil && s != "" {
-				cfg.RedirectURIs = []string{s}
+				// Split newline-separated URIs into individual entries
+				parts := strings.Split(s, "\n")
+				for _, p := range parts {
+					p = strings.TrimSpace(p)
+					if p != "" {
+						cfg.RedirectURIs = append(cfg.RedirectURIs, p)
+					}
+				}
 			}
 		}
 	}

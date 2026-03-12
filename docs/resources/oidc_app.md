@@ -69,7 +69,7 @@ output "client_secret" {
 - `configuration` (Block, Optional) OIDC-specific configuration settings. (see [below for nested schema](#nestedblock--configuration))
 - `description` (String) A description of the app.
 - `notes` (String) Notes about the app.
-- `parameters` (Attributes Set) Application parameters. (see [below for nested schema](#nestedatt--parameters))
+- `parameters` (Attributes List) Application parameters. Order matters — elements are matched positionally between config and state. (see [below for nested schema](#nestedatt--parameters))
 - `policy_id` (Number) The security policy ID.
 - `provisioning` (Attributes) Provisioning settings for the app. (see [below for nested schema](#nestedatt--provisioning))
 - `role_ids` (Set of Number) Set of role IDs that can access this app.
