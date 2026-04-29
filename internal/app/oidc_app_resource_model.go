@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 
@@ -185,12 +186,12 @@ func (m *OIDCAppResourceModel) ToSDKApp(ctx context.Context) (*models.App, diag.
 		if !diags.HasError() {
 			configMap := map[string]interface{}{}
 
-			// redirect_uris → send as JSON array under "redirect_uri" key
+			// redirect_uris → send as newline-joined string under "redirect_uri" key
 			if !cfg.RedirectURIs.IsNull() && !cfg.RedirectURIs.IsUnknown() {
 				var uris []string
 				d := cfg.RedirectURIs.ElementsAs(ctx, &uris, false)
 				diags.Append(d...)
-				// Deduplicate
+				// Deduplicate while preserving order
 				seen := make(map[string]bool, len(uris))
 				unique := make([]string, 0, len(uris))
 				for _, u := range uris {
@@ -199,7 +200,7 @@ func (m *OIDCAppResourceModel) ToSDKApp(ctx context.Context) (*models.App, diag.
 						unique = append(unique, u)
 					}
 				}
-				configMap["redirect_uri"] = unique
+				configMap["redirect_uri"] = strings.Join(unique, "\n")
 			}
 
 			if !cfg.LoginURL.IsNull() && !cfg.LoginURL.IsUnknown() {
