@@ -110,6 +110,15 @@ func (r *samlAppResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 						UseStateWhenConfigNullString(),
 					},
 				},
+				"logout_url": schema.StringAttribute{
+					Optional:    true,
+					Computed:    true,
+					Description: "The SAML single logout URL.",
+					PlanModifiers: []planmodifier.String{
+						stringplanmodifier.UseStateForUnknown(),
+						UseStateWhenConfigNullString(),
+					},
+				},
 				"subdomain": schema.StringAttribute{
 					Optional:    true,
 					Computed:    true,

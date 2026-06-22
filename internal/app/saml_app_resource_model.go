@@ -32,6 +32,7 @@ type SAMLConfigurationModel struct {
 	Audience           types.String `tfsdk:"audience"`
 	Recipient          types.String `tfsdk:"recipient"`
 	RelayState         types.String `tfsdk:"relaystate"`
+	LogoutURL          types.String `tfsdk:"logout_url"`
 	Subdomain          types.String `tfsdk:"subdomain"`
 }
 
@@ -59,6 +60,7 @@ func SAMLConfigAttrTypes() map[string]attr.Type {
 		"audience":            types.StringType,
 		"recipient":           types.StringType,
 		"relaystate":          types.StringType,
+		"logout_url":          types.StringType,
 		"subdomain":           types.StringType,
 	}
 }
@@ -129,6 +131,9 @@ func (m *SAMLAppResourceModel) ToSDKApp(ctx context.Context) (*models.App, diag.
 			if !cfg.RelayState.IsNull() && !cfg.RelayState.IsUnknown() {
 				configMap["relaystate"] = cfg.RelayState.ValueString()
 			}
+			if !cfg.LogoutURL.IsNull() && !cfg.LogoutURL.IsUnknown() {
+				configMap["logout_url"] = cfg.LogoutURL.ValueString()
+			}
 			if !cfg.Subdomain.IsNull() && !cfg.Subdomain.IsUnknown() {
 				configMap["subdomain"] = cfg.Subdomain.ValueString()
 			}
@@ -173,6 +178,7 @@ func (m *SAMLAppResourceModel) FromSDKApp(ctx context.Context, app *models.App) 
 				"audience":            StringOrNull(cfg.Audience),
 				"recipient":           StringOrNull(cfg.Recipient),
 				"relaystate":          StringOrNull(cfg.RelayState),
+				"logout_url":          StringOrNull(cfg.LogoutURL),
 				"subdomain":           StringOrNull(cfg.Subdomain),
 			})
 			diags.Append(d...)

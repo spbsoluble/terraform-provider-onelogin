@@ -154,6 +154,48 @@ func TestAccSAMLAppResource_parameterSetChange(t *testing.T) {
 	})
 }
 
+// TestAccSAMLAppResource_logoutAndRelayState is the live regression test for the
+// SAML logout_url support and the relaystate key fix.
+func TestAccSAMLAppResource_logoutAndRelayState(t *testing.T) {
+	rName := acctest.RandomWithPrefix("tf-acc-saml-logout")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccSAMLAppResourceConfig_logout(rName, "https://example.com/slo", "https://example.com/relay"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("onelogin_saml_app.test", "configuration.logout_url", "https://example.com/slo"),
+					resource.TestCheckResourceAttr("onelogin_saml_app.test", "configuration.relaystate", "https://example.com/relay"),
+				),
+			},
+			{
+				Config: testAccSAMLAppResourceConfig_logout(rName, "https://example.com/slo/v2", "https://example.com/relay/v2"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("onelogin_saml_app.test", "configuration.logout_url", "https://example.com/slo/v2"),
+					resource.TestCheckResourceAttr("onelogin_saml_app.test", "configuration.relaystate", "https://example.com/relay/v2"),
+				),
+			},
+		},
+	})
+}
+
+func testAccSAMLAppResourceConfig_logout(name, logout, relay string) string {
+	return fmt.Sprintf(`
+resource "onelogin_saml_app" "test" {
+  name         = %[1]q
+  connector_id = 110016
+
+  configuration {
+    audience   = "https://example.com"
+    logout_url = %[2]q
+    relaystate = %[3]q
+  }
+}
+`, name, logout, relay)
+}
+
 // --- Config helpers ---
 
 func testAccSAMLAppResourceConfig_params2(name string) string {

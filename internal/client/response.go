@@ -116,6 +116,7 @@ type OIDCConfig struct {
 	RedirectURIs                  []string        `json:"-"`
 	RedirectURIRaw                json.RawMessage `json:"redirect_uri"`
 	LoginURL                      string          `json:"login_url"`
+	PostLogoutRedirectURI         string          `json:"post_logout_redirect_uri"`
 	OidcApplicationType           int             `json:"oidc_application_type"`
 	TokenEndpointAuthMethod       int             `json:"token_endpoint_auth_method"`
 	AccessTokenExpirationMinutes  int             `json:"access_token_expiration_minutes"`
@@ -174,6 +175,7 @@ type SAMLConfig struct {
 	Audience           string      `json:"audience"`
 	Recipient          string      `json:"recipient"`
 	RelayState         string      `json:"relaystate"`
+	LogoutURL          string      `json:"logout_url"`
 	Subdomain          string      `json:"subdomain"`
 }
 

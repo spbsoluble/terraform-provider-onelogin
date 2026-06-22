@@ -209,6 +209,47 @@ func TestAccOIDCAppResource_manyRedirectURIs(t *testing.T) {
 
 // --- Config helpers ---
 
+// TestAccOIDCAppResource_postLogoutRedirectURI is the live regression test for the
+// logout_url gap — OIDC apps expose the logout target as post_logout_redirect_uri.
+// Before the fix the value was silently dropped (never sent, no diff).
+func TestAccOIDCAppResource_postLogoutRedirectURI(t *testing.T) {
+	rName := acctest.RandomWithPrefix("tf-acc-oidc-logout")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccOIDCAppResourceConfig_postLogout(rName, "https://example.com/logout"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("onelogin_oidc_app.test", "configuration.post_logout_redirect_uri", "https://example.com/logout"),
+				),
+			},
+			// Update the value — must round-trip cleanly.
+			{
+				Config: testAccOIDCAppResourceConfig_postLogout(rName, "https://example.com/logout/v2"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("onelogin_oidc_app.test", "configuration.post_logout_redirect_uri", "https://example.com/logout/v2"),
+				),
+			},
+		},
+	})
+}
+
+func testAccOIDCAppResourceConfig_postLogout(name, logout string) string {
+	return fmt.Sprintf(`
+resource "onelogin_oidc_app" "test" {
+  name         = %[1]q
+  connector_id = 108419
+
+  configuration {
+    redirect_uris            = ["https://example.com/callback"]
+    post_logout_redirect_uri = %[2]q
+  }
+}
+`, name, logout)
+}
+
 func testAccOIDCAppResourceConfig_basic(name string) string {
 	return fmt.Sprintf(`
 resource "onelogin_oidc_app" "test" {

@@ -67,6 +67,14 @@ func (r *oidcAppResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 						stringplanmodifier.UseStateForUnknown(),
 					},
 				},
+				"post_logout_redirect_uri": schema.StringAttribute{
+					Optional:    true,
+					Computed:    true,
+					Description: "The post-logout redirect URI (where users are sent after sign-out).",
+					PlanModifiers: []planmodifier.String{
+						stringplanmodifier.UseStateForUnknown(),
+					},
+				},
 				"oidc_application_type": schema.StringAttribute{
 					Optional:    true,
 					Computed:    true,

@@ -11,7 +11,6 @@ import (
 	models "github.com/onelogin/onelogin-go-sdk/v4/pkg/onelogin/models"
 )
 
-
 // RoleResourceModel describes the resource data model.
 // Users are intentionally absent — role membership is managed via OneLogin mappings, not
 // Terraform. See docs/resources/role.md for details. Admins are tracked as email addresses

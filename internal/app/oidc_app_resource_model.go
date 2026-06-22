@@ -45,6 +45,7 @@ func oidcConfigAsOptions() basetypes.ObjectAsOptions {
 type OIDCConfigurationModel struct {
 	RedirectURIs                  types.Set    `tfsdk:"redirect_uris"`
 	LoginURL                      types.String `tfsdk:"login_url"`
+	PostLogoutRedirectURI         types.String `tfsdk:"post_logout_redirect_uri"`
 	OidcApplicationType           types.String `tfsdk:"oidc_application_type"`
 	TokenEndpointAuthMethod       types.String `tfsdk:"token_endpoint_auth_method"`
 	AccessTokenExpirationMinutes  types.Int64  `tfsdk:"access_token_expiration_minutes"`
@@ -69,6 +70,7 @@ func OIDCConfigAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
 		"redirect_uris":                    types.SetType{ElemType: types.StringType},
 		"login_url":                        types.StringType,
+		"post_logout_redirect_uri":         types.StringType,
 		"oidc_application_type":            types.StringType,
 		"token_endpoint_auth_method":       types.StringType,
 		"access_token_expiration_minutes":  types.Int64Type,
@@ -206,6 +208,9 @@ func (m *OIDCAppResourceModel) ToSDKApp(ctx context.Context) (*models.App, diag.
 			if !cfg.LoginURL.IsNull() && !cfg.LoginURL.IsUnknown() {
 				configMap["login_url"] = cfg.LoginURL.ValueString()
 			}
+			if !cfg.PostLogoutRedirectURI.IsNull() && !cfg.PostLogoutRedirectURI.IsUnknown() {
+				configMap["post_logout_redirect_uri"] = cfg.PostLogoutRedirectURI.ValueString()
+			}
 			if !cfg.OidcApplicationType.IsNull() && !cfg.OidcApplicationType.IsUnknown() {
 				v, err := oidcAppTypeToInt(cfg.OidcApplicationType.ValueString())
 				if err != nil {
@@ -276,6 +281,7 @@ func (m *OIDCAppResourceModel) FromSDKApp(ctx context.Context, app *models.App) 
 			configObj, d := types.ObjectValue(OIDCConfigAttrTypes(), map[string]attr.Value{
 				"redirect_uris":                    redirectURIsVal,
 				"login_url":                        StringOrNull(cfg.LoginURL),
+				"post_logout_redirect_uri":         StringOrNull(cfg.PostLogoutRedirectURI),
 				"oidc_application_type":            types.StringValue(oidcAppTypeFromInt(cfg.OidcApplicationType)),
 				"token_endpoint_auth_method":       types.StringValue(tokenAuthMethodFromInt(cfg.TokenEndpointAuthMethod)),
 				"access_token_expiration_minutes":  types.Int64Value(int64(cfg.AccessTokenExpirationMinutes)),
