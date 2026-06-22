@@ -11,7 +11,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -193,7 +192,7 @@ func ParametersBlock() schema.ListNestedAttribute {
 		Computed:    true,
 		Description: "Application parameters.",
 		PlanModifiers: []planmodifier.List{
-			listplanmodifier.UseStateForUnknown(),
+			UseStateForUnknownParametersByKey(),
 		},
 		NestedObject: schema.NestedAttributeObject{
 			Attributes: map[string]schema.Attribute{
@@ -204,9 +203,11 @@ func ParametersBlock() schema.ListNestedAttribute {
 				"param_id": schema.Int64Attribute{
 					Computed:    true,
 					Description: "The parameter ID assigned by OneLogin.",
-					PlanModifiers: []planmodifier.Int64{
-						int64planmodifier.UseStateForUnknown(),
-					},
+					// param_id is carried forward from prior state by the
+					// list-level UseStateForUnknownParametersByKey modifier,
+					// matched on param_key_name rather than list index. A
+					// nested index-based UseStateForUnknown here would bind the
+					// wrong ID to an element whenever the parameter set changes.
 				},
 				"label": schema.StringAttribute{
 					Optional:    true,
@@ -580,4 +581,109 @@ func (m useStateWhenConfigNullString) PlanModifyString(_ context.Context, req pl
 	if req.ConfigValue.IsNull() && !req.StateValue.IsNull() && !req.StateValue.IsUnknown() {
 		resp.PlanValue = req.StateValue
 	}
+}
+
+// useStateForUnknownParametersByKey is the list plan modifier for the
+// `parameters` attribute. The provider canonicalises parameters to alphabetical
+// order by param_key_name on read/apply (see parametersFromSDK /
+// FilterParametersByKnownKeys), and the OneLogin SDK models parameters as a map
+// keyed by param_key_name — they are not a positional list.
+//
+// The stock per-element int64planmodifier.UseStateForUnknown on param_id carried
+// the computed ID forward *by list index*. That breaks whenever the parameter set
+// changes: inserting or removing a key shifts every later element's alphabetical
+// position, so the plan binds a prior param_id to the wrong element and apply then
+// returns a differently-ordered list — "Provider produced inconsistent result
+// after apply" (observed on velo_ops_jenkins_prod_2 / _non_prd_2).
+//
+// This modifier instead carries each element's computed param_id forward from the
+// prior state element with the *same* param_key_name. Brand-new keys keep an
+// unknown param_id for apply to populate. It deliberately does NOT reorder the
+// list: param_key_name is a Required attribute, so the plan must keep config order
+// (the generator already emits parameters sorted by key, matching apply order).
+type useStateForUnknownParametersByKey struct{}
+
+// UseStateForUnknownParametersByKey returns the list plan modifier that binds
+// computed param_id values to prior state by param_key_name instead of by index.
+func UseStateForUnknownParametersByKey() planmodifier.List {
+	return useStateForUnknownParametersByKey{}
+}
+
+func (m useStateForUnknownParametersByKey) Description(_ context.Context) string {
+	return "Carry computed param_id forward from prior state matched by param_key_name"
+}
+
+func (m useStateForUnknownParametersByKey) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (m useStateForUnknownParametersByKey) PlanModifyList(ctx context.Context, req planmodifier.ListRequest, resp *planmodifier.ListResponse) {
+	// Nothing planned (e.g. destroy) — leave as-is.
+	if req.PlanValue.IsNull() || req.PlanValue.IsUnknown() {
+		return
+	}
+	// No prior state to carry forward (create) — leave param_ids unknown for apply.
+	if req.StateValue.IsNull() || req.StateValue.IsUnknown() {
+		return
+	}
+
+	var planModels []ParameterModel
+	if diags := req.PlanValue.ElementsAs(ctx, &planModels, false); diags.HasError() {
+		resp.Diagnostics.Append(diags...)
+		return
+	}
+
+	var stateModels []ParameterModel
+	if diags := req.StateValue.ElementsAs(ctx, &stateModels, false); diags.HasError() {
+		resp.Diagnostics.Append(diags...)
+		return
+	}
+
+	// Map prior-state param_id by param_key_name.
+	idByKey := make(map[string]types.Int64, len(stateModels))
+	for _, pm := range stateModels {
+		if !pm.ParamID.IsNull() && !pm.ParamID.IsUnknown() {
+			idByKey[pm.ParamKeyName.ValueString()] = pm.ParamID
+		}
+	}
+
+	changed := false
+	for i := range planModels {
+		if !planModels[i].ParamID.IsUnknown() {
+			continue
+		}
+		if id, ok := idByKey[planModels[i].ParamKeyName.ValueString()]; ok {
+			planModels[i].ParamID = id
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+
+	elems := make([]attr.Value, 0, len(planModels))
+	for _, pm := range planModels {
+		obj, d := types.ObjectValue(ParameterAttrTypes(), map[string]attr.Value{
+			"param_key_name":             pm.ParamKeyName,
+			"param_id":                   pm.ParamID,
+			"label":                      pm.Label,
+			"user_attribute_mappings":    pm.UserAttributeMappings,
+			"user_attribute_macros":      pm.UserAttributeMacros,
+			"attributes_transformations": pm.AttributesTransformations,
+			"default_values":             pm.DefaultValues,
+			"values":                     pm.Values,
+			"skip_if_blank":              pm.SkipIfBlank,
+			"provisioned_entitlements":   pm.ProvisionedEntitlements,
+			"include_in_saml_assertion":  pm.IncludeInSamlAssertion,
+		})
+		resp.Diagnostics.Append(d...)
+		elems = append(elems, obj)
+	}
+
+	listVal, d := types.ListValue(types.ObjectType{AttrTypes: ParameterAttrTypes()}, elems)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.PlanValue = listVal
 }
