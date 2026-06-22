@@ -197,6 +197,53 @@ func TestParamModifier_PreservesConfigOrder(t *testing.T) {
 	}
 }
 
+// TestParamModifier_UnknownPlanUsesState guards the regression where config omits
+// `parameters` entirely (Optional+Computed → whole list unknown). The modifier must
+// carry prior state forward — like the stock UseStateForUnknown — so the attribute
+// does not churn as "known after apply" on every plan (affects OIDC apps with no
+// parameters block).
+func TestParamModifier_UnknownPlanUsesState(t *testing.T) {
+	state := buildParamsList(t, []paramSpec{
+		{key: "groups", id: 555},
+	})
+	plan := types.ListUnknown(types.ObjectType{AttrTypes: ParameterAttrTypes()})
+
+	ctx := context.Background()
+	resp := &planmodifier.ListResponse{PlanValue: plan}
+	UseStateForUnknownParametersByKey().PlanModifyList(ctx, planmodifier.ListRequest{
+		PlanValue:  plan,
+		StateValue: state,
+	}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("diagnostics: %v", resp.Diagnostics)
+	}
+	if resp.PlanValue.IsUnknown() {
+		t.Fatal("plan value left unknown; expected prior state to be carried forward")
+	}
+	var got []ParameterModel
+	if d := resp.PlanValue.ElementsAs(ctx, &got, false); d.HasError() {
+		t.Fatalf("decode: %v", d)
+	}
+	if len(got) != 1 || got[0].ParamID.ValueInt64() != 555 {
+		t.Errorf("expected state carried forward (groups id=555), got %+v", got)
+	}
+}
+
+// TestParamModifier_UnknownPlanNoStateStaysUnknown confirms that an unknown plan
+// with no prior state (create with omitted parameters) is left unknown for apply.
+func TestParamModifier_UnknownPlanNoStateStaysUnknown(t *testing.T) {
+	plan := types.ListUnknown(types.ObjectType{AttrTypes: ParameterAttrTypes()})
+	ctx := context.Background()
+	resp := &planmodifier.ListResponse{PlanValue: plan}
+	UseStateForUnknownParametersByKey().PlanModifyList(ctx, planmodifier.ListRequest{
+		PlanValue:  plan,
+		StateValue: types.ListNull(types.ObjectType{AttrTypes: ParameterAttrTypes()}),
+	}, resp)
+	if !resp.PlanValue.IsUnknown() {
+		t.Fatal("expected plan to stay unknown when there is no prior state")
+	}
+}
+
 // TestParamModifier_CreateLeavesUnknown confirms that with no prior state (create)
 // the param_ids are left unknown for apply to populate.
 func TestParamModifier_CreateLeavesUnknown(t *testing.T) {

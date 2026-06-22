@@ -618,8 +618,18 @@ func (m useStateForUnknownParametersByKey) MarkdownDescription(ctx context.Conte
 }
 
 func (m useStateForUnknownParametersByKey) PlanModifyList(ctx context.Context, req planmodifier.ListRequest, resp *planmodifier.ListResponse) {
-	// Nothing planned (e.g. destroy) — leave as-is.
-	if req.PlanValue.IsNull() || req.PlanValue.IsUnknown() {
+	// Whole attribute unknown — config omitted `parameters` (it is Optional and
+	// Computed, e.g. OIDC apps with no parameters block). Mirror the stock
+	// listplanmodifier.UseStateForUnknown and carry the prior state forward so the
+	// attribute does not churn as "known after apply" on every plan.
+	if req.PlanValue.IsUnknown() {
+		if !req.StateValue.IsNull() && !req.StateValue.IsUnknown() {
+			resp.PlanValue = req.StateValue
+		}
+		return
+	}
+	// Null plan (destroy) — nothing to do.
+	if req.PlanValue.IsNull() {
 		return
 	}
 	// No prior state to carry forward (create) — leave param_ids unknown for apply.
